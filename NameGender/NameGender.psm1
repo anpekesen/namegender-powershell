@@ -50,6 +50,9 @@ function Invoke-NameGenderApi {
             $exception = [System.Exception]::new("$($details.message) ($($details.error))")
             $exception.Data['error'] = $details.error
             $exception.Data['request_id'] = $details.request_id
+            # 422 invalid_input names the field; an unsupported language also lists the supported ones.
+            if ($details.PSObject.Properties['field']) { $exception.Data['field'] = $details.field }
+            if ($details.PSObject.Properties['supported']) { $exception.Data['supported'] = [string[]] @($details.supported) }
             throw $exception
         }
 
@@ -184,4 +187,125 @@ function Get-NameGenderAccount {
     Invoke-NameGenderApi -Path '/me' -ApiKey $key -Method 'GET'
 }
 
-Export-ModuleMember -Function Get-NameGender, Get-NameGenderCountry, Get-NameGenderAccount
+function Get-NameGenderSalutation {
+    <#
+    .SYNOPSIS
+    Builds the salutation for a letter or email from full names.
+
+    .DESCRIPTION
+    One name calls the single endpoint; several names (from -Name or the
+    pipeline) are sent in bulk requests of up to 100, and the results come
+    back in input order. One credit per name. Each result carries the formal,
+    informal and neutral salutation, plus form, reason, parts, gender and
+    probability. When the gender is not certain the neutral form is used:
+    form is 'neutral' and reason says why. -BestGuess does not apply here.
+
+    With -Form, only that salutation text is returned, one string per name.
+
+    .EXAMPLE
+    Get-NameGenderSalutation 'Dr. Anna Müller' -Language de -Form formal
+
+    .EXAMPLE
+    Get-NameGenderSalutation -FirstName Ahmet -LastName Yılmaz -Language tr
+
+    .EXAMPLE
+    Get-Content names.txt | Get-NameGenderSalutation -Language de | Select-Object query, form, reason, @{ n = 'formal'; e = { $_.salutation.formal } }
+    #>
+    [CmdletBinding(DefaultParameterSetName = 'Name')]
+    param(
+        # Full name, titles included ("Dr. Anna Müller").
+        [Parameter(ParameterSetName = 'Name', Mandatory, Position = 0, ValueFromPipeline)]
+        [AllowEmptyString()]
+        [string[]] $Name,
+
+        # Instead of -Name, when the parts are stored separately. Not parsed.
+        [Parameter(ParameterSetName = 'Parts')]
+        [string] $FirstName,
+
+        [Parameter(ParameterSetName = 'Parts')]
+        [string] $LastName,
+
+        # en, en-US, en-GB, de, de-AT, de-CH, fr, es, it, pt, pt-PT, pt-BR, nl, tr, pl, ja.
+        # Default: the language of -Locale, else the main language of the country, else en.
+        [string] $Language,
+
+        # Country hint for the gender lookup, as in Get-NameGender.
+        [ValidatePattern('^[A-Za-z]{2}$')]
+        [string] $Country,
+
+        [string] $Locale,
+
+        [string] $Ip,
+
+        # Known gender; skips the lookup. neutral always gives the neutral form.
+        [ValidateSet('male', 'female', 'neutral')]
+        [string] $Gender,
+
+        # Below this probability the neutral form is used. API default: 90.
+        [ValidateRange(50, 100)]
+        [int] $MinProbability,
+
+        # Academic title kept in a separate field, such as Dr.; used in de and en.
+        [string] $Title,
+
+        # Return only this salutation text instead of the whole result.
+        [ValidateSet('formal', 'informal', 'neutral')]
+        [string] $Form,
+
+        [string] $ApiKey
+    )
+
+    begin {
+        $key = Resolve-NameGenderKey $ApiKey
+        $values = [System.Collections.Generic.List[string]]::new()
+        $pick = $Form.ToLowerInvariant()
+
+        # Only the options that were given are sent.
+        $options = @{}
+        if ($Language) { $options.language = $Language }
+        if ($Country) { $options.country = $Country.ToUpperInvariant() }
+        if ($Locale) { $options.locale = $Locale }
+        if ($Ip) { $options.ip = $Ip }
+        if ($Gender) { $options.gender = $Gender.ToLowerInvariant() }
+        if ($PSBoundParameters.ContainsKey('MinProbability')) { $options.min_probability = $MinProbability }
+        if ($Title) { $options.title = $Title }
+    }
+
+    process {
+        foreach ($value in $Name) {
+            $trimmed = "$value".Trim()
+            # Blank lines are not sent.
+            if ($trimmed) { $values.Add($trimmed) }
+        }
+    }
+
+    end {
+        $results = $null
+
+        if ($PSCmdlet.ParameterSetName -eq 'Parts') {
+            if (-not $FirstName -and -not $LastName) { throw 'Pass -FirstName, -LastName or both.' }
+            $body = $options.Clone()
+            if ($FirstName) { $body.first_name = $FirstName }
+            if ($LastName) { $body.last_name = $LastName }
+            $results = @(Invoke-NameGenderApi -Path '/salutation' -ApiKey $key -Body $body)
+        } elseif ($values.Count -eq 0) {
+            return
+        } elseif ($values.Count -eq 1) {
+            $body = $options.Clone()
+            $body.name = $values[0]
+            $results = @(Invoke-NameGenderApi -Path '/salutation' -ApiKey $key -Body $body)
+        } else {
+            $results = for ($i = 0; $i -lt $values.Count; $i += $script:Chunk) {
+                $body = $options.Clone()
+                $body.names = @($values.GetRange($i, [Math]::Min($script:Chunk, $values.Count - $i)))
+                (Invoke-NameGenderApi -Path '/salutation/bulk' -ApiKey $key -Body $body).results
+            }
+        }
+
+        foreach ($result in $results) {
+            if ($pick) { $result.salutation.$pick } else { $result }
+        }
+    }
+}
+
+Export-ModuleMember -Function Get-NameGender, Get-NameGenderCountry, Get-NameGenderAccount, Get-NameGenderSalutation

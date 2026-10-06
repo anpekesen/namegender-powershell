@@ -71,6 +71,36 @@ volume from the countries that publish counted birth statistics, and
 `attested_in` is presence with no weight attached. Show `basis.note` next to
 any percentage.
 
+## Salutation
+
+```powershell
+Get-NameGenderSalutation 'Dr. Anna Müller' -Language de -Form formal   # Sehr geehrte Frau Dr. Müller,
+Get-NameGenderSalutation 'Ahmet Yılmaz' -Language tr -Form formal      # Sayın Ahmet Bey,
+
+# Parts stored separately: no parsing is done
+Get-NameGenderSalutation -FirstName Anna -LastName Müller -Title Dr. -Language de
+
+# Many names: pipeline input is sent in bulk requests of up to 100, in input order
+Get-Content names.txt | Get-NameGenderSalutation -Language de |
+    Select-Object query, form, reason, @{ n = 'formal'; e = { $_.salutation.formal } }
+```
+
+A result carries `salutation` (`formal`, `informal`, `neutral`), `form`
+(`gendered`, `neutral` or `organization`), `reason`, `parts`, `gender`,
+`gender_source`, `probability`, `first_name`, `last_name`, `name_type` and
+`country`. `-Form formal|informal|neutral` returns only that text.
+
+`-Language` takes en, en-US, en-GB, de, de-AT, de-CH, fr, es, it, pt, pt-PT,
+pt-BR, nl, tr, pl or ja; anything else is refused with `invalid_input`, and
+`$_.Exception.Data['supported']` lists the languages. `-Country`, `-Locale` and
+`-Ip` hint the gender lookup, `-Gender male|female|neutral` skips it,
+`-MinProbability` (50–100, default 90) sets how sure it must be, and `-Title`
+takes an academic title kept in a separate field.
+
+One credit per name. When the gender is not certain the gendered form is not
+guessed: `form` is `neutral` and `reason` says why (`gender_unknown`,
+`below_min_probability`, ...). `-BestGuess` does not apply to salutations.
+
 ## License
 
 MIT

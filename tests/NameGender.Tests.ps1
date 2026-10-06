@@ -118,6 +118,135 @@ Describe 'Get-NameGenderAccount and Get-NameGenderCountry' {
     }
 }
 
+Describe 'Get-NameGenderSalutation' {
+    BeforeEach {
+        $env:NAMEGENDER_API_KEY = 'ng_live_test'
+        Remove-Item Env:NAMEGENDER_BASE_URL -ErrorAction SilentlyContinue
+
+        Mock -ModuleName NameGender Invoke-RestMethod {
+            $sent = [System.Text.Encoding]::UTF8.GetString($Body) | ConvertFrom-Json
+            if ($sent.PSObject.Properties['language'] -and $sent.language -eq 'xx') {
+                $record = [System.Management.Automation.ErrorRecord]::new(
+                    [System.Exception]::new('Response status code does not indicate success: 422'), 'HttpError', 'InvalidOperation', $null)
+                $record.ErrorDetails = [System.Management.Automation.ErrorDetails]::new(
+                    '{"error":"invalid_input","message":"Unsupported language.","field":"language","supported":["en","de","tr"],"request_id":"req_3"}')
+                throw $record
+            }
+            if ($Uri -like '*/salutation/bulk') {
+                $results = @($sent.names | ForEach-Object {
+                    if ($_ -eq 'Kim Lee') {
+                        [pscustomobject]@{
+                            query = $_; language = 'de'; form = 'neutral'; reason = 'gender_unknown'
+                            salutation = [pscustomobject]@{ formal = 'Guten Tag Kim Lee,'; informal = 'Hallo Kim Lee,'; neutral = 'Guten Tag Kim Lee,' }
+                            parts = [pscustomobject]@{ opening = 'Guten Tag'; courtesy = $null; academic = $null; name = 'Kim Lee' }
+                            gender = $null; probability = $null
+                        }
+                    } else {
+                        [pscustomobject]@{
+                            query = $_; language = 'de'; form = 'gendered'; reason = $null
+                            salutation = [pscustomobject]@{ formal = "Sehr geehrte Frau $_,"; informal = "Liebe $_,"; neutral = "Guten Tag $_," }
+                            parts = [pscustomobject]@{ opening = 'Sehr geehrte'; courtesy = 'Frau'; academic = $null; name = $_ }
+                            gender = 'female'; probability = 98
+                        }
+                    }
+                })
+                [pscustomobject]@{
+                    credits_charged = $results.Count; language = 'de'
+                    summary = [pscustomobject]@{ total = $results.Count; gendered = $results.Count; neutral = 0; organization = 0 }
+                    results = $results
+                }
+            } else {
+                [pscustomobject]@{
+                    credits_charged = 1; credits_remaining = 4999; query = 'Dr. Anna Müller'; language = 'de'; form = 'gendered'; reason = $null
+                    salutation = [pscustomobject]@{ formal = 'Sehr geehrte Frau Dr. Müller,'; informal = 'Liebe Anna,'; neutral = 'Guten Tag Dr. Anna Müller,' }
+                    parts = [pscustomobject]@{ opening = 'Sehr geehrte'; courtesy = 'Frau'; academic = 'Dr.'; name = 'Müller' }
+                    gender = 'female'; gender_source = 'lookup'; probability = 99; name_type = 'personal'; country = 'DE'
+                }
+            }
+        }
+    }
+
+    It 'sends one name to /salutation with only the options that were given' {
+        $result = Get-NameGenderSalutation 'Dr. Anna Müller' -Language de -Country de
+
+        $result.salutation.formal | Should -Be 'Sehr geehrte Frau Dr. Müller,'
+        $result.salutation.informal | Should -Be 'Liebe Anna,'
+        $result.salutation.neutral | Should -Be 'Guten Tag Dr. Anna Müller,'
+        $result.reason | Should -BeNullOrEmpty
+        $result.parts.academic | Should -Be 'Dr.'
+        Should -Invoke -ModuleName NameGender Invoke-RestMethod -Times 1 -Exactly -ParameterFilter {
+            $sent = [System.Text.Encoding]::UTF8.GetString($Body) | ConvertFrom-Json
+            $Uri -eq 'https://namegender.com/api/v1/salutation' -and $Method -eq 'POST' -and
+            (($sent.PSObject.Properties.Name | Sort-Object) -join ',') -eq 'country,language,name' -and
+            $sent.name -eq 'Dr. Anna Müller' -and $sent.country -eq 'DE' -and $sent.language -eq 'de'
+        }
+    }
+
+    It 'sends first and last name, gender, title and minimum probability' {
+        Get-NameGenderSalutation -FirstName Anna -LastName 'Müller' -Gender Female -Title 'Dr.' -MinProbability 80 | Out-Null
+
+        Should -Invoke -ModuleName NameGender Invoke-RestMethod -Times 1 -Exactly -ParameterFilter {
+            $sent = [System.Text.Encoding]::UTF8.GetString($Body) | ConvertFrom-Json
+            $Uri -like '*/salutation' -and
+            (($sent.PSObject.Properties.Name | Sort-Object) -join ',') -eq 'first_name,gender,last_name,min_probability,title' -and
+            $sent.first_name -eq 'Anna' -and $sent.last_name -eq 'Müller' -and $sent.gender -eq 'female' -and
+            $sent.title -eq 'Dr.' -and $sent.min_probability -eq 80
+        }
+    }
+
+    It 'returns only the chosen form with -Form' {
+        Get-NameGenderSalutation 'Dr. Anna Müller' -Form informal | Should -Be 'Liebe Anna,'
+    }
+
+    It 'collects pipeline input into one bulk request, keeps the order and skips blank lines' {
+        $results = 'Anna Müller', '', '  Kim Lee  ', 'Eva Weber' | Get-NameGenderSalutation -Language de
+
+        @($results).Count | Should -Be 3
+        ($results.query -join ',') | Should -Be 'Anna Müller,Kim Lee,Eva Weber'
+        $results[0].reason | Should -BeNullOrEmpty
+        $results[1].form | Should -Be 'neutral'
+        $results[1].reason | Should -Be 'gender_unknown'
+        $results[1].parts.courtesy | Should -BeNullOrEmpty
+        Should -Invoke -ModuleName NameGender Invoke-RestMethod -Times 1 -Exactly -ParameterFilter {
+            $sent = [System.Text.Encoding]::UTF8.GetString($Body) | ConvertFrom-Json
+            $Uri -like '*/salutation/bulk' -and ($sent.names -join ',') -eq 'Anna Müller,Kim Lee,Eva Weber' -and
+            (($sent.PSObject.Properties.Name | Sort-Object) -join ',') -eq 'language,names'
+        }
+    }
+
+    It 'splits more than 100 names into chunks of 100 and applies -Form to each' {
+        $names = 1..205 | ForEach-Object { "Name$_" }
+        $results = $names | Get-NameGenderSalutation -Form formal
+
+        @($results).Count | Should -Be 205
+        $results[0] | Should -Be 'Sehr geehrte Frau Name1,'
+        $results[204] | Should -Be 'Sehr geehrte Frau Name205,'
+        Should -Invoke -ModuleName NameGender Invoke-RestMethod -Times 3 -Exactly
+        Should -Invoke -ModuleName NameGender Invoke-RestMethod -Times 1 -Exactly -ParameterFilter {
+            @(([System.Text.Encoding]::UTF8.GetString($Body) | ConvertFrom-Json).names).Count -eq 5
+        }
+    }
+
+    It 'throws the API reason, field and supported languages for an unsupported language' {
+        $caught = $null
+        try { Get-NameGenderSalutation 'Ahmet Yılmaz' -Language xx } catch { $caught = $_ }
+
+        $caught | Should -Not -BeNullOrEmpty
+        $caught.Exception.Message | Should -Be 'Unsupported language. (invalid_input)'
+        $caught.Exception.Data['error'] | Should -Be 'invalid_input'
+        $caught.Exception.Data['field'] | Should -Be 'language'
+        ($caught.Exception.Data['supported'] -join ',') | Should -Be 'en,de,tr'
+    }
+
+    It 'rejects invalid options before any request' {
+        { Get-NameGenderSalutation 'Anna Müller' -Gender other } | Should -Throw
+        { Get-NameGenderSalutation 'Anna Müller' -MinProbability 40 } | Should -Throw
+        { Get-NameGenderSalutation 'Anna Müller' -Form casual } | Should -Throw
+        { Get-NameGenderSalutation -FirstName '' } | Should -Throw
+        Should -Invoke -ModuleName NameGender Invoke-RestMethod -Times 0
+    }
+}
+
 Describe 'Live API (optional)' -Skip:(-not $env:NAMEGENDER_LIVE_KEY) {
     It 'resolves a real name' {
         $result = Get-NameGender Emma -ApiKey $env:NAMEGENDER_LIVE_KEY
