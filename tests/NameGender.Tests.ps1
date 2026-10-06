@@ -247,6 +247,137 @@ Describe 'Get-NameGenderSalutation' {
     }
 }
 
+Describe 'Test-NameGenderName' {
+    BeforeEach {
+        $env:NAMEGENDER_API_KEY = 'ng_live_test'
+        Remove-Item Env:NAMEGENDER_BASE_URL -ErrorAction SilentlyContinue
+
+        Mock -ModuleName NameGender Invoke-RestMethod {
+            $sent = [System.Text.Encoding]::UTF8.GetString($Body) | ConvertFrom-Json
+            if ($sent.PSObject.Properties['name'] -and $sent.name -eq 'No Credit') {
+                $record = [System.Management.Automation.ErrorRecord]::new(
+                    [System.Exception]::new('Response status code does not indicate success: 402'), 'HttpError', 'InvalidOperation', $null)
+                $record.ErrorDetails = [System.Management.Automation.ErrorDetails]::new(
+                    '{"error":"no_credits","message":"No credits left.","request_id":"req_4"}')
+                throw $record
+            }
+            $check = {
+                param($query)
+                if ($query -eq 'asdf qwerty') {
+                    [pscustomobject]@{
+                        query = $query; assessment = 'implausible'; score = 0
+                        signals = @(
+                            [pscustomobject]@{ code = 'keyboard_pattern'; severity = 'high'; part = 'first_name'; value = 'asdf' }
+                            [pscustomobject]@{ code = 'single_name'; severity = 'low'; part = $null; value = $null }
+                        )
+                        first_name = 'Asdf'; last_name = 'Qwerty'; name_type = 'personal'
+                        evidence = [pscustomobject]@{ first_name_status = $null; first_name_counted_records = 0 }
+                    }
+                } else {
+                    [pscustomobject]@{
+                        query = $query; assessment = 'plausible'; score = 95; signals = @()
+                        first_name = 'Jennifer'; last_name = 'Null'; name_type = 'personal'
+                        evidence = [pscustomobject]@{ first_name_status = 'counted'; first_name_counted_records = 1500000 }
+                    }
+                }
+            }
+            if ($Uri -like '*/name-check/bulk') {
+                $results = @($sent.names | ForEach-Object { & $check $_ })
+                [pscustomobject]@{
+                    credits_charged = $results.Count; took_ms = 4; country_source = $null
+                    summary = [pscustomobject]@{ total = $results.Count; plausible = 0; suspicious = 0; implausible = 0 }
+                    results = $results
+                }
+            } else {
+                $query = if ($sent.PSObject.Properties['name']) { $sent.name } else { 'Jennifer Null' }
+                $result = & $check $query
+                $result | Add-Member credits_charged 1
+                $result | Add-Member credits_remaining 4999
+                $result | Add-Member country_source 'ip'
+                $result
+            }
+        }
+    }
+
+    It 'sends one name to /name-check with only the options that were given' {
+        $result = Test-NameGenderName 'asdf qwerty' -Ip 203.0.113.7
+
+        $result.assessment | Should -Be 'implausible'
+        $result.score | Should -Be 0
+        $result.country_source | Should -Be 'ip'
+        $result.signals[0].code | Should -Be 'keyboard_pattern'
+        $result.signals[0].severity | Should -Be 'high'
+        $result.signals[0].part | Should -Be 'first_name'
+        $result.signals[0].value | Should -Be 'asdf'
+        $result.signals[1].part | Should -BeNullOrEmpty
+        $result.signals[1].value | Should -BeNullOrEmpty
+        $result.evidence.first_name_status | Should -BeNullOrEmpty
+        $result.evidence.first_name_counted_records | Should -Be 0
+        Should -Invoke -ModuleName NameGender Invoke-RestMethod -Times 1 -Exactly -ParameterFilter {
+            $sent = [System.Text.Encoding]::UTF8.GetString($Body) | ConvertFrom-Json
+            $Uri -eq 'https://namegender.com/api/v1/name-check' -and $Method -eq 'POST' -and
+            (($sent.PSObject.Properties.Name | Sort-Object) -join ',') -eq 'ip,name' -and
+            $sent.name -eq 'asdf qwerty' -and $sent.ip -eq '203.0.113.7'
+        }
+    }
+
+    It 'sends first and last name with country and locale' {
+        $result = Test-NameGenderName -FirstName Jennifer -LastName Null -Country us -Locale en-US
+
+        $result.assessment | Should -Be 'plausible'
+        $result.evidence.first_name_status | Should -Be 'counted'
+        Should -Invoke -ModuleName NameGender Invoke-RestMethod -Times 1 -Exactly -ParameterFilter {
+            $sent = [System.Text.Encoding]::UTF8.GetString($Body) | ConvertFrom-Json
+            $Uri -like '*/name-check' -and
+            (($sent.PSObject.Properties.Name | Sort-Object) -join ',') -eq 'country,first_name,last_name,locale' -and
+            $sent.first_name -eq 'Jennifer' -and $sent.last_name -eq 'Null' -and $sent.country -eq 'US' -and $sent.locale -eq 'en-US'
+        }
+    }
+
+    It 'collects pipeline input into one bulk request, keeps the order and skips blank lines' {
+        $results = 'Jennifer Null', '', '  asdf qwerty  ', 'Ayşe Yılmaz' | Test-NameGenderName -Country US
+
+        @($results).Count | Should -Be 3
+        ($results.query -join ',') | Should -Be 'Jennifer Null,asdf qwerty,Ayşe Yılmaz'
+        ($results.assessment -join ',') | Should -Be 'plausible,implausible,plausible'
+        Should -Invoke -ModuleName NameGender Invoke-RestMethod -Times 1 -Exactly -ParameterFilter {
+            $sent = [System.Text.Encoding]::UTF8.GetString($Body) | ConvertFrom-Json
+            $Uri -like '*/name-check/bulk' -and ($sent.names -join ',') -eq 'Jennifer Null,asdf qwerty,Ayşe Yılmaz' -and
+            (($sent.PSObject.Properties.Name | Sort-Object) -join ',') -eq 'country,names'
+        }
+    }
+
+    It 'splits more than 100 names into chunks of 100' {
+        $names = 1..205 | ForEach-Object { "Name$_" }
+        $results = $names | Test-NameGenderName
+
+        @($results).Count | Should -Be 205
+        $results[0].query | Should -Be 'Name1'
+        $results[204].query | Should -Be 'Name205'
+        Should -Invoke -ModuleName NameGender Invoke-RestMethod -Times 3 -Exactly
+        Should -Invoke -ModuleName NameGender Invoke-RestMethod -Times 1 -Exactly -ParameterFilter {
+            @(([System.Text.Encoding]::UTF8.GetString($Body) | ConvertFrom-Json).names).Count -eq 5
+        }
+    }
+
+    It 'throws the API reason code' {
+        $caught = $null
+        try { Test-NameGenderName 'No Credit' } catch { $caught = $_ }
+
+        $caught | Should -Not -BeNullOrEmpty
+        $caught.Exception.Message | Should -Be 'No credits left. (no_credits)'
+        $caught.Exception.Data['error'] | Should -Be 'no_credits'
+        $caught.Exception.Data['request_id'] | Should -Be 'req_4'
+    }
+
+    It 'rejects invalid options before any request' {
+        { Test-NameGenderName 'Jennifer Null' -Country USA } | Should -Throw
+        { Test-NameGenderName -FirstName '' } | Should -Throw
+        { Test-NameGenderName 'Jennifer Null' -FirstName Jennifer } | Should -Throw
+        Should -Invoke -ModuleName NameGender Invoke-RestMethod -Times 0
+    }
+}
+
 Describe 'Live API (optional)' -Skip:(-not $env:NAMEGENDER_LIVE_KEY) {
     It 'resolves a real name' {
         $result = Get-NameGender Emma -ApiKey $env:NAMEGENDER_LIVE_KEY

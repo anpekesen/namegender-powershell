@@ -101,6 +101,31 @@ One credit per name. When the gender is not certain the gendered form is not
 guessed: `form` is `neutral` and `reason` says why (`gender_unknown`,
 `below_min_probability`, ...). `-BestGuess` does not apply to salutations.
 
+## Name check
+
+```powershell
+Test-NameGenderName 'asdf qwerty'      # assessment: implausible, score: 0
+Test-NameGenderName 'Jennifer Null'    # assessment: plausible
+
+# Parts stored separately: no parsing is done
+Test-NameGenderName -FirstName Jennifer -LastName Null -Country US
+
+# Many names: pipeline input is sent in bulk requests of up to 100, in input order
+Import-Csv signups.csv | Select-Object -ExpandProperty FullName |
+    Test-NameGenderName | Where-Object assessment -ne 'plausible' |
+    Select-Object query, assessment, score, @{ n = 'signals'; e = { $_.signals.code -join ',' } }
+```
+
+Says whether a name typed into a form looks like a real person's name. A
+result carries `assessment` (`plausible`, `suspicious` or `implausible`),
+`score` (0–100), `signals` (each with `code`, `severity`, `part` and `value`;
+`part` and `value` may be empty), `first_name`, `last_name`, `name_type` and
+`evidence`. `-Country`, `-Locale` and `-Ip` work as in `Get-NameGender`.
+
+One credit per name. It never calls a name fake: use it to flag records for a
+look, not to reject people automatically. First names are checked against the
+name data; surnames are judged by their shape only.
+
 ## License
 
 MIT

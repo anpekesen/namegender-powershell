@@ -308,4 +308,95 @@ function Get-NameGenderSalutation {
     }
 }
 
-Export-ModuleMember -Function Get-NameGender, Get-NameGenderCountry, Get-NameGenderAccount, Get-NameGenderSalutation
+function Test-NameGenderName {
+    <#
+    .SYNOPSIS
+    Says whether names typed into a form look like real people's names.
+
+    .DESCRIPTION
+    One name calls the single endpoint; several names (from -Name or the
+    pipeline) are sent in bulk requests of up to 100, and the results come
+    back in input order. One credit per name. Each result carries assessment
+    (plausible, suspicious or implausible), score (0-100), signals (code,
+    severity, part, value), first_name, last_name, name_type and evidence.
+
+    It never calls a name fake: use it to flag records for a look, not to
+    reject people automatically. Surnames are judged by their shape only.
+
+    .EXAMPLE
+    Test-NameGenderName 'asdf qwerty'
+
+    .EXAMPLE
+    Test-NameGenderName -FirstName Jennifer -LastName Null -Country US
+
+    .EXAMPLE
+    Import-Csv signups.csv | Select-Object -ExpandProperty FullName | Test-NameGenderName | Where-Object assessment -ne 'plausible'
+    #>
+    [CmdletBinding(DefaultParameterSetName = 'Name')]
+    param(
+        # Full name as typed ("Jennifer Null").
+        [Parameter(ParameterSetName = 'Name', Mandatory, Position = 0, ValueFromPipeline)]
+        [AllowEmptyString()]
+        [string[]] $Name,
+
+        # Instead of -Name, when the parts are stored separately. Not parsed.
+        [Parameter(ParameterSetName = 'Parts')]
+        [string] $FirstName,
+
+        [Parameter(ParameterSetName = 'Parts')]
+        [string] $LastName,
+
+        # Country hint, as in Get-NameGender.
+        [ValidatePattern('^[A-Za-z]{2}$')]
+        [string] $Country,
+
+        [string] $Locale,
+
+        [string] $Ip,
+
+        [string] $ApiKey
+    )
+
+    begin {
+        $key = Resolve-NameGenderKey $ApiKey
+        $values = [System.Collections.Generic.List[string]]::new()
+
+        # Only the options that were given are sent.
+        $options = @{}
+        if ($Country) { $options.country = $Country.ToUpperInvariant() }
+        if ($Locale) { $options.locale = $Locale }
+        if ($Ip) { $options.ip = $Ip }
+    }
+
+    process {
+        foreach ($value in $Name) {
+            $trimmed = "$value".Trim()
+            # Blank lines are not sent.
+            if ($trimmed) { $values.Add($trimmed) }
+        }
+    }
+
+    end {
+        if ($PSCmdlet.ParameterSetName -eq 'Parts') {
+            if (-not $FirstName -and -not $LastName) { throw 'Pass -FirstName, -LastName or both.' }
+            $body = $options.Clone()
+            if ($FirstName) { $body.first_name = $FirstName }
+            if ($LastName) { $body.last_name = $LastName }
+            Invoke-NameGenderApi -Path '/name-check' -ApiKey $key -Body $body
+        } elseif ($values.Count -eq 0) {
+            return
+        } elseif ($values.Count -eq 1) {
+            $body = $options.Clone()
+            $body.name = $values[0]
+            Invoke-NameGenderApi -Path '/name-check' -ApiKey $key -Body $body
+        } else {
+            for ($i = 0; $i -lt $values.Count; $i += $script:Chunk) {
+                $body = $options.Clone()
+                $body.names = @($values.GetRange($i, [Math]::Min($script:Chunk, $values.Count - $i)))
+                (Invoke-NameGenderApi -Path '/name-check/bulk' -ApiKey $key -Body $body).results
+            }
+        }
+    }
+}
+
+Export-ModuleMember -Function Get-NameGender, Get-NameGenderCountry, Get-NameGenderAccount, Get-NameGenderSalutation, Test-NameGenderName
