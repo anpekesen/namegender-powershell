@@ -1,0 +1,36 @@
+# Pester on Windows PowerShell 5.1 and PowerShell 7 (Windows and Linux).
+# 5.1 matters: it is what most Windows machines run, and it encodes request
+# bodies differently from PowerShell 7.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            shell: powershell
+          - os: windows-latest
+            shell: pwsh
+          - os: ubuntu-latest
+            shell: pwsh
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Pester 5
+        run: Install-Module Pester -MinimumVersion 5.5 -Force -Scope CurrentUser -SkipPublisherCheck
+      - name: Test
+        run: |
+          Import-Module Pester -MinimumVersion 5.5
+          $result = Invoke-Pester -Path tests -Output Detailed -PassThru
+          if ($result.FailedCount -gt 0) { exit 1 }
+      - name: Manifest
+        run: Test-ModuleManifest NameGender/NameGender.psd1

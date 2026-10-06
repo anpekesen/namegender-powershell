@@ -1,0 +1,34 @@
+# PowerShell Gallery release on a v* tag.
+#
+# The Gallery has no trusted publishing, so this needs the repository secret
+# PSGALLERY_API_KEY (powershellgallery.com > API Keys, scoped to the
+# NameGender package, "Push new packages and package versions"). The tag must
+# match ModuleVersion in the manifest; a mismatch stops before publishing,
+# because a Gallery version cannot be deleted.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the tag against the manifest
+        run: |
+          $version = (Import-PowerShellDataFile NameGender/NameGender.psd1).ModuleVersion
+          if ("v$version" -ne $env:GITHUB_REF_NAME) { throw "Tag $env:GITHUB_REF_NAME does not match ModuleVersion $version" }
+      - name: Test
+        run: |
+          Install-Module Pester -MinimumVersion 5.5 -Force -Scope CurrentUser -SkipPublisherCheck
+          $result = Invoke-Pester -Path tests -PassThru
+          if ($result.FailedCount -gt 0) { exit 1 }
+      - name: Publish
+        env:
+          PSGALLERY_API_KEY: ${{ secrets.PSGALLERY_API_KEY }}
+        run: Publish-Module -Path ./NameGender -NuGetApiKey $env:PSGALLERY_API_KEY
