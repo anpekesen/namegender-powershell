@@ -80,12 +80,15 @@ function Get-NameGender {
     [CmdletBinding(DefaultParameterSetName = 'Name')]
     param(
         [Parameter(ParameterSetName = 'Name', Mandatory, Position = 0, ValueFromPipeline)]
+        [AllowEmptyString()]
         [string[]] $Name,
 
         [Parameter(ParameterSetName = 'Email', Mandatory, ValueFromPipeline)]
+        [AllowEmptyString()]
         [string[]] $Email,
 
         [Parameter(ParameterSetName = 'Username', Mandatory, ValueFromPipeline)]
+        [AllowEmptyString()]
         [string[]] $Username,
 
         # Two-letter country code. Andrea is male in Italy and female in Germany.
@@ -117,6 +120,7 @@ function Get-NameGender {
     }
 
     process {
+        # Blank lines are allowed in (Get-Content gives them) and dropped here.
         $batch = switch ($type) { 'email' { $Email } 'username' { $Username } default { $Name } }
         foreach ($value in $batch) {
             $trimmed = "$value".Trim()
