@@ -399,4 +399,93 @@ function Test-NameGenderName {
     }
 }
 
-Export-ModuleMember -Function Get-NameGender, Get-NameGenderCountry, Get-NameGenderAccount, Get-NameGenderSalutation, Test-NameGenderName
+function Get-NameGenderAge {
+    <#
+    .SYNOPSIS
+    Estimates the age of the people who carry a first name.
+
+    .DESCRIPTION
+    One name calls the single endpoint; several names (from -Name or the
+    pipeline) are sent in bulk requests of up to 100, and the results come
+    back in input order. Each result carries age (the median), age_range (the
+    middle half), age_range_80 (the middle 80%), birth_year, sample_size,
+    births, country, country_source, source, series, reference_year and
+    reason.
+
+    Covers the US, France and Norway. With no country hint US data is used
+    (country_source 'default'). A name with no answer is a normal result, not
+    an error: age is empty and reason is not_found, insufficient_data or
+    country_not_covered; country_not_covered costs no credit.
+
+    It describes a group, not a person: never use it for decisions about an
+    individual.
+
+    .EXAMPLE
+    Get-NameGenderAge Brittany
+
+    .EXAMPLE
+    Get-NameGenderAge Camille -Country FR -Gender female
+
+    .EXAMPLE
+    Get-Content names.txt | Get-NameGenderAge | Select-Object name, age, @{ n = 'low'; e = { $_.age_range.low } }, @{ n = 'high'; e = { $_.age_range.high } }, reason
+    #>
+    [CmdletBinding()]
+    param(
+        # First name or full name; the first name is used.
+        [Parameter(Mandatory, Position = 0, ValueFromPipeline)]
+        [AllowEmptyString()]
+        [string[]] $Name,
+
+        # Narrows the estimate to one gender's records.
+        [ValidateSet('male', 'female')]
+        [string] $Gender,
+
+        # Country hint, as in Get-NameGender.
+        [ValidatePattern('^[A-Za-z]{2}$')]
+        [string] $Country,
+
+        [string] $Locale,
+
+        [string] $Ip,
+
+        [string] $ApiKey
+    )
+
+    begin {
+        $key = Resolve-NameGenderKey $ApiKey
+        $values = [System.Collections.Generic.List[string]]::new()
+
+        # Only the options that were given are sent.
+        $options = @{}
+        if ($Gender) { $options.gender = $Gender.ToLowerInvariant() }
+        if ($Country) { $options.country = $Country.ToUpperInvariant() }
+        if ($Locale) { $options.locale = $Locale }
+        if ($Ip) { $options.ip = $Ip }
+    }
+
+    process {
+        foreach ($value in $Name) {
+            $trimmed = "$value".Trim()
+            # Blank lines are not sent.
+            if ($trimmed) { $values.Add($trimmed) }
+        }
+    }
+
+    end {
+        if ($values.Count -eq 0) {
+            return
+        } elseif ($values.Count -eq 1) {
+            $body = $options.Clone()
+            $body.name = $values[0]
+            Invoke-NameGenderApi -Path '/age' -ApiKey $key -Body $body
+        } else {
+            for ($i = 0; $i -lt $values.Count; $i += $script:Chunk) {
+                $body = $options.Clone()
+                $body.names = @($values.GetRange($i, [Math]::Min($script:Chunk, $values.Count - $i)))
+                (Invoke-NameGenderApi -Path '/age/bulk' -ApiKey $key -Body $body).results
+            }
+        }
+    }
+}
+
+Export-ModuleMember -Function Get-NameGender, Get-NameGenderCountry, Get-NameGenderAccount, Get-NameGenderSalutation, Test-NameGenderName, Get-NameGenderAge

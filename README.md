@@ -126,6 +126,32 @@ One credit per name. It never calls a name fake: use it to flag records for a
 look, not to reject people automatically. First names are checked against the
 name data; surnames are judged by their shape only.
 
+## Age from name
+
+```powershell
+Get-NameGenderAge Brittany              # age: 36, age_range: 32-38
+Get-NameGenderAge Camille -Country FR -Gender female
+
+# Many names: pipeline input is sent in bulk requests of up to 100, in input order
+Get-Content names.txt | Get-NameGenderAge |
+    Select-Object name, age, @{ n = 'low'; e = { $_.age_range.low } }, @{ n = 'high'; e = { $_.age_range.high } }, reason
+```
+
+Estimates the age of the people who carry a first name from birth records:
+`age` is the median (Brittany: 36), `age_range` the middle half (32–38) and
+`age_range_80` the middle 80%. A result also carries `birth_year`,
+`sample_size`, `births`, `country`, `country_source`, `source`, `series`,
+`reference_year` and `reason`. `-Gender male` or `-Gender female` narrows the
+estimate to one gender's records; `-Country`, `-Locale` and `-Ip` work as in
+`Get-NameGender`, and with none of them US data is used (`country_source` is
+`default`).
+
+It covers the US, France and Norway. A name with no estimate is a normal
+result, not an error: `age` is empty and `reason` is `not_found`,
+`insufficient_data` or `country_not_covered` (other countries; no credit
+charged). It describes a group, not a person: never use it for decisions about
+an individual.
+
 ## License
 
 MIT

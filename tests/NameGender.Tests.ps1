@@ -378,7 +378,133 @@ Describe 'Test-NameGenderName' {
     }
 }
 
-Describe 'Live API (optional)' -Skip:(-not $env:NAMEGENDER_LIVE_KEY) {
+Describe 'Get-NameGenderAge' {
+    BeforeEach {
+        $env:NAMEGENDER_API_KEY = 'ng_live_test'
+        Remove-Item Env:NAMEGENDER_BASE_URL -ErrorAction SilentlyContinue
+
+        Mock -ModuleName NameGender Invoke-RestMethod {
+            $sent = [System.Text.Encoding]::UTF8.GetString($Body) | ConvertFrom-Json
+            $estimate = {
+                param($name, $country)
+                if ($country -and $country -ne 'US') {
+                    [pscustomobject]@{
+                        name = $name; first_name = $name; gender = $null; age = $null
+                        age_range = $null; age_range_80 = $null; birth_year = $null
+                        sample_size = 0; births = 0; country = $country; country_source = 'country'
+                        source = $null; series = $null; reference_year = 2026; reason = 'country_not_covered'
+                    }
+                } else {
+                    [pscustomobject]@{
+                        name = $name; first_name = $name; gender = $null; age = 36
+                        age_range = [pscustomobject]@{ low = 32; high = 38 }
+                        age_range_80 = [pscustomobject]@{ low = 28; high = 41 }
+                        birth_year = 1990; sample_size = 353775; births = 361434
+                        country = 'US'; country_source = 'default'
+                        source = 'ssa'; series = '1880-2024'; reference_year = 2026; reason = $null
+                    }
+                }
+            }
+            $country = if ($sent.PSObject.Properties['country']) { $sent.country } else { $null }
+            if ($Uri -like '*/age/bulk') {
+                [pscustomobject]@{
+                    credits_charged = @($sent.names).Count; credits_remaining = 49000; request_id = 'req_2'
+                    country_source = 'default'
+                    results = @($sent.names | ForEach-Object { & $estimate $_ $country })
+                }
+            } else {
+                $result = & $estimate $sent.name $country
+                $charged = if ($result.reason -eq 'country_not_covered') { 0 } else { 1 }
+                $result | Add-Member credits_charged $charged
+                $result | Add-Member credits_remaining 49999
+                $result | Add-Member request_id 'req_1'
+                $result
+            }
+        }
+    }
+
+    It 'sends one name to /age with only the name and parses both ranges' {
+        $result = Get-NameGenderAge Brittany
+
+        $result.age | Should -Be 36
+        $result.age_range.low | Should -Be 32
+        $result.age_range.high | Should -Be 38
+        $result.age_range_80.low | Should -Be 28
+        $result.age_range_80.high | Should -Be 41
+        $result.birth_year | Should -Be 1990
+        $result.sample_size | Should -Be 353775
+        $result.births | Should -Be 361434
+        $result.country | Should -Be 'US'
+        $result.country_source | Should -Be 'default'
+        $result.source | Should -Be 'ssa'
+        $result.series | Should -Be '1880-2024'
+        $result.reference_year | Should -Be 2026
+        $result.reason | Should -BeNullOrEmpty
+        $result.gender | Should -BeNullOrEmpty
+        $result.credits_charged | Should -Be 1
+        Should -Invoke -ModuleName NameGender Invoke-RestMethod -Times 1 -Exactly -ParameterFilter {
+            $sent = [System.Text.Encoding]::UTF8.GetString($Body) | ConvertFrom-Json
+            $Uri -eq 'https://namegender.com/api/v1/age' -and $Method -eq 'POST' -and
+            $Headers.Authorization -eq 'Bearer ng_live_test' -and
+            (($sent.PSObject.Properties.Name | Sort-Object) -join ',') -eq 'name' -and
+            $sent.name -eq 'Brittany'
+        }
+    }
+
+    It 'sends gender, country, locale and ip when given' {
+        Get-NameGenderAge Brittany -Gender Female -Country us -Locale en-US -Ip 203.0.113.7 | Out-Null
+
+        Should -Invoke -ModuleName NameGender Invoke-RestMethod -Times 1 -Exactly -ParameterFilter {
+            $sent = [System.Text.Encoding]::UTF8.GetString($Body) | ConvertFrom-Json
+            $Uri -like '*/age' -and
+            (($sent.PSObject.Properties.Name | Sort-Object) -join ',') -eq 'country,gender,ip,locale,name' -and
+            $sent.gender -eq 'female' -and $sent.country -eq 'US' -and $sent.locale -eq 'en-US' -and $sent.ip -eq '203.0.113.7'
+        }
+    }
+
+    It 'returns country_not_covered as a result with no age, not an error' {
+        $result = Get-NameGenderAge Ayşe -Country TR
+
+        $result.age | Should -BeNullOrEmpty
+        $result.age_range | Should -BeNullOrEmpty
+        $result.age_range_80 | Should -BeNullOrEmpty
+        $result.birth_year | Should -BeNullOrEmpty
+        $result.reason | Should -Be 'country_not_covered'
+        $result.credits_charged | Should -Be 0
+        $result.country | Should -Be 'TR'
+    }
+
+    It 'collects pipeline input into one bulk request, keeps the order and skips blank lines' {
+        $results = 'Brittany', '', '  Emma  ', 'Olivia' | Get-NameGenderAge -Gender female
+
+        @($results).Count | Should -Be 3
+        ($results.name -join ',') | Should -Be 'Brittany,Emma,Olivia'
+        $results[0].age_range.low | Should -Be 32
+        Should -Invoke -ModuleName NameGender Invoke-RestMethod -Times 1 -Exactly -ParameterFilter {
+            $sent = [System.Text.Encoding]::UTF8.GetString($Body) | ConvertFrom-Json
+            $Uri -like '*/age/bulk' -and ($sent.names -join ',') -eq 'Brittany,Emma,Olivia' -and
+            (($sent.PSObject.Properties.Name | Sort-Object) -join ',') -eq 'gender,names'
+        }
+    }
+
+    It 'splits more than 100 names into chunks of 100' {
+        $names = 1..205 | ForEach-Object { "Name$_" }
+        $results = $names | Get-NameGenderAge
+
+        @($results).Count | Should -Be 205
+        $results[0].name | Should -Be 'Name1'
+        $results[204].name | Should -Be 'Name205'
+        Should -Invoke -ModuleName NameGender Invoke-RestMethod -Times 3 -Exactly
+    }
+
+    It 'rejects invalid options before any request' {
+        { Get-NameGenderAge Brittany -Gender neutral } | Should -Throw
+        { Get-NameGenderAge Brittany -Country USA } | Should -Throw
+        Should -Invoke -ModuleName NameGender Invoke-RestMethod -Times 0
+    }
+}
+
+Describe 'Live API (optional) -Skip:(-not $env:NAMEGENDER_LIVE_KEY) {
     It 'resolves a real name' {
         $result = Get-NameGender Emma -ApiKey $env:NAMEGENDER_LIVE_KEY
         $result.gender | Should -Be 'female'
