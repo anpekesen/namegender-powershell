@@ -504,7 +504,7 @@ Describe 'Get-NameGenderAge' {
     }
 }
 
-Describe 'Live API (optional) -Skip:(-not $env:NAMEGENDER_LIVE_KEY) {
+Describe 'Live API (optional)' -Skip:(-not $env:NAMEGENDER_LIVE_KEY) {
     It 'resolves a real name' {
         $result = Get-NameGender Emma -ApiKey $env:NAMEGENDER_LIVE_KEY
         $result.gender | Should -Be 'female'
